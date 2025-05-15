@@ -6,19 +6,21 @@ import (
 )
 
 type config struct {
-	service        string
-	insertSpanName string
-	workSpanName   string
-	measured       bool
-	spanOpts       []tracer.StartSpanOption
+	service                  string
+	insertSpanName           string
+	workSpanName             string
+	measured                 bool
+	spanOpts                 []tracer.StartSpanOption
+	enableDistributedTracing bool
 }
 
 func defaultConfig() *config {
 	return &config{
-		service:        instr.ServiceName(instrumentation.ComponentConsumer, nil),
-		insertSpanName: instr.OperationName(instrumentation.ComponentProducer, nil),
-		workSpanName:   instr.OperationName(instrumentation.ComponentConsumer, nil),
-		measured:       false,
+		service:                  instr.ServiceName(instrumentation.ComponentConsumer, nil),
+		insertSpanName:           instr.OperationName(instrumentation.ComponentProducer, nil),
+		workSpanName:             instr.OperationName(instrumentation.ComponentConsumer, nil),
+		measured:                 false,
+		enableDistributedTracing: false,
 	}
 }
 
@@ -29,6 +31,13 @@ type Option func(cfg *config)
 func WithService(service string) Option {
 	return func(cfg *config) {
 		cfg.service = service
+	}
+}
+
+// WithDistributedTracing enables distributed tracing if set to true. Default is false.
+func WithDistributedTracing(enable bool) Option {
+	return func(cfg *config) {
+		cfg.enableDistributedTracing = enable
 	}
 }
 

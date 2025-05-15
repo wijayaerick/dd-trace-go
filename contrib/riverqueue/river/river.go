@@ -62,11 +62,13 @@ func (m *InsertMiddleware) InsertMany(
 	defer func() {
 		span.Finish(tracer.WithError(err))
 	}()
-	spanCtx := span.Context()
 
-	for _, params := range manyParams {
-		if err = injectSpanContext(spanCtx, params); err != nil {
-			return nil, err
+	if m.cfg.enableDistributedTracing {
+		spanCtx := span.Context()
+		for _, params := range manyParams {
+			if err = injectSpanContext(spanCtx, params); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -106,16 +108,18 @@ func (m *WorkerMiddleware) Work(ctx context.Context, job *rivertype.JobRow, doIn
 		tracer.Tag("river_job.attempt", job.Attempt),
 	)
 
-	carrier, err := metadataToCarrier(job.Metadata)
-	if err != nil {
-		return err
-	}
-
-	if spanCtx, err := tracer.Extract(carrier); err == nil { // if NO error
-		if spanCtx != nil && spanCtx.SpanLinks() != nil {
-			opts = append(opts, tracer.WithSpanLinks(spanCtx.SpanLinks()))
+	if m.cfg.enableDistributedTracing {
+		carrier, err := metadataToCarrier(job.Metadata)
+		if err != nil {
+			return err
 		}
-		opts = append(opts, tracer.ChildOf(spanCtx))
+
+		if spanCtx, err := tracer.Extract(carrier); err == nil { // if NO error
+			if spanCtx != nil && spanCtx.SpanLinks() != nil {
+				opts = append(opts, tracer.WithSpanLinks(spanCtx.SpanLinks()))
+			}
+			opts = append(opts, tracer.ChildOf(spanCtx))
+		}
 	}
 
 	span, ctx := tracer.StartSpanFromContext(ctx, m.cfg.workSpanName, opts...)

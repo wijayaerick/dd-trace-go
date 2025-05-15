@@ -137,9 +137,9 @@ func TestPropagation(t *testing.T) {
 		TestOnly:            true,
 		MaxAttempts:         1,
 		JobTimeout:          1 * time.Second,
-		JobInsertMiddleware: []rivertype.JobInsertMiddleware{NewInsertMiddleware()},
+		JobInsertMiddleware: []rivertype.JobInsertMiddleware{NewInsertMiddleware(WithDistributedTracing(true))},
 		Workers:             workers,
-		WorkerMiddleware:    []rivertype.WorkerMiddleware{NewWorkerMiddleware()},
+		WorkerMiddleware:    []rivertype.WorkerMiddleware{NewWorkerMiddleware(WithDistributedTracing(true))},
 		Queues:              map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 1}},
 	})
 	require.NoError(t, err)
@@ -210,9 +210,9 @@ func TestPropagationWithService(t *testing.T) {
 		TestOnly:            true,
 		MaxAttempts:         1,
 		JobTimeout:          1 * time.Second,
-		JobInsertMiddleware: []rivertype.JobInsertMiddleware{NewInsertMiddleware(WithService("insert.service"))},
+		JobInsertMiddleware: []rivertype.JobInsertMiddleware{NewInsertMiddleware(WithService("insert.service"), WithDistributedTracing(true))},
 		Workers:             workers,
-		WorkerMiddleware:    []rivertype.WorkerMiddleware{NewWorkerMiddleware(WithService("worker.service"))},
+		WorkerMiddleware:    []rivertype.WorkerMiddleware{NewWorkerMiddleware(WithService("worker.service"), WithDistributedTracing(true))},
 		Queues:              map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 1}},
 	})
 	require.NoError(t, err)
@@ -265,9 +265,9 @@ func TestPropagationNoParentSpan(t *testing.T) {
 		TestOnly:            true,
 		MaxAttempts:         1,
 		JobTimeout:          1 * time.Second,
-		JobInsertMiddleware: []rivertype.JobInsertMiddleware{NewInsertMiddleware()},
+		JobInsertMiddleware: []rivertype.JobInsertMiddleware{NewInsertMiddleware(WithDistributedTracing(true))},
 		Workers:             workers,
-		WorkerMiddleware:    []rivertype.WorkerMiddleware{NewWorkerMiddleware()},
+		WorkerMiddleware:    []rivertype.WorkerMiddleware{NewWorkerMiddleware(WithDistributedTracing(true))},
 		Queues:              map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 1}},
 	})
 	require.NoError(t, err)
@@ -354,7 +354,7 @@ func TestPropagationNoInsertSpan(t *testing.T) {
 		JobTimeout:          1 * time.Second,
 		JobInsertMiddleware: nil, // no tracing on JobInsert
 		Workers:             workers,
-		WorkerMiddleware:    []rivertype.WorkerMiddleware{NewWorkerMiddleware()},
+		WorkerMiddleware:    []rivertype.WorkerMiddleware{NewWorkerMiddleware(WithDistributedTracing(true))},
 		Queues:              map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 1}},
 	})
 	require.NoError(t, err)
@@ -484,9 +484,9 @@ func TestAdditionalMetadata(t *testing.T) {
 		TestOnly:            true,
 		MaxAttempts:         1,
 		JobTimeout:          1 * time.Second,
-		JobInsertMiddleware: []rivertype.JobInsertMiddleware{NewInsertMiddleware()},
+		JobInsertMiddleware: []rivertype.JobInsertMiddleware{NewInsertMiddleware(WithDistributedTracing(true))},
 		Workers:             workers,
-		WorkerMiddleware:    []rivertype.WorkerMiddleware{NewWorkerMiddleware()},
+		WorkerMiddleware:    []rivertype.WorkerMiddleware{NewWorkerMiddleware(WithDistributedTracing(true))},
 		Queues:              map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 1}},
 	})
 	require.NoError(t, err)
@@ -523,7 +523,7 @@ func TestInvalidMetadata(t *testing.T) {
 		TestOnly:            true,
 		MaxAttempts:         1,
 		JobTimeout:          1 * time.Second,
-		JobInsertMiddleware: []rivertype.JobInsertMiddleware{NewInsertMiddleware()},
+		JobInsertMiddleware: []rivertype.JobInsertMiddleware{NewInsertMiddleware(WithDistributedTracing(true))},
 	})
 	require.NoError(t, err)
 	t.Cleanup(stopClientF(t, client))
@@ -538,6 +538,63 @@ func TestInvalidMetadata(t *testing.T) {
 	assert.Equal(t, "river.send", spans[0].OperationName())
 
 	assert.Equal(t, err.Error(), spans[0].Tags()[ext.ErrorMsg])
+}
+
+func TestWithoutDistributedTracing(t *testing.T) {
+	ctx, mt, driver := setup(t)
+
+	var (
+		called      = false
+		jobMetadata string
+	)
+	worker := testWorker{f: func(ctx context.Context, job *river.Job[jobArg]) error {
+		assert.False(t, called, "work called twice")
+		assert.Equal(t, "data", job.Args.Data)
+		jobMetadata = string(job.Metadata)
+		called = true
+		return nil
+	}}
+	workers := river.NewWorkers()
+	require.NoError(t, river.AddWorkerSafely(workers, worker))
+
+	client, err := river.NewClient(driver, &river.Config{
+		TestOnly:            true,
+		MaxAttempts:         1,
+		JobTimeout:          1 * time.Second,
+		JobInsertMiddleware: []rivertype.JobInsertMiddleware{NewInsertMiddleware()},
+		Workers:             workers,
+		WorkerMiddleware:    []rivertype.WorkerMiddleware{NewWorkerMiddleware()},
+		Queues:              map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 1}},
+	})
+	require.NoError(t, err)
+	t.Cleanup(stopClientF(t, client))
+
+	_, err = client.Insert(ctx, jobArg{Data: "data"}, &river.InsertOpts{})
+	assert.NoError(t, err)
+
+	events, _ := client.Subscribe(river.EventKindJobCompleted, river.EventKindJobFailed)
+	require.NoError(t, client.Start(context.Background()))
+	select {
+	case event := <-events:
+		assert.Equal(t, river.EventKindJobCompleted, event.Kind)
+		assert.True(t, called, "work not called")
+	case <-ctx.Done():
+		require.Fail(t, "did not receive event before timeout")
+	}
+
+	spans := mt.FinishedSpans()
+	assert.Len(t, spans, 2, "wrong number of spans")
+	assert.Equal(t, "river.send", spans[0].OperationName())
+	assert.Equal(t, "river.process", spans[1].OperationName())
+
+	s0 := spans[0]
+	assert.Equal(t, s0.TraceID(), s0.SpanID())
+
+	s1 := spans[1]
+	assert.Equal(t, s1.TraceID(), s1.SpanID())
+	assert.NotEqual(t, s0.SpanID(), s1.ParentID())
+
+	assert.Equal(t, `{}`, jobMetadata)
 }
 
 func setup(t *testing.T) (context.Context, mocktracer.Tracer, *riverpgxv5.Driver) {
